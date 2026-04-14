@@ -11,8 +11,8 @@ __all__ = ["get_seq_from_napari"]
 
 def get_seq_from_napari(
     main_window: MainWindow,
-    autofocus_device: str = "PFS-Offset",
-    rel_focus_device: str = "Focus",
+    # autofocus_device: str = "PFS-Offset",
+    # rel_focus_device: str = "Focus",
 ) -> MDASequence:
     """Get the MDA sequence from the MDA widget.
 
@@ -32,10 +32,11 @@ def get_seq_from_napari(
     MDASequence
     """
     mda_dock = main_window._dock_widgets["MDA"]
-    seq = mda_dock.children()[4].get_state()
+    # seq = mda_dock.children()[4].get_state()
+    seq = mda_dock.children()[4].value()
     new_metadata = dict(seq.metadata)
-    new_metadata["autofocus"] = {
-        "autofocus_device": autofocus_device,
-        "rel_focus_device": rel_focus_device,
-    }
+    # new_metadata["autofocus"] = {
+    #     "autofocus_device": autofocus_device,
+    #     "rel_focus_device": rel_focus_device,
+    # }
     return seq.replace(metadata=new_metadata)

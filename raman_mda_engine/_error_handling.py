@@ -21,3 +21,8 @@ def slack_notify(wrapped, instance, args, kwargs):
             data = {"text": f"Something broke! <!channel>\n```\n{tb}\n```"}
             requests.post(_url, json=data)
         raise e
+
+def send_slack_message(message: str):
+    data = {"text": message}
+    if _url != "":
+        requests.post(_url, json=data)

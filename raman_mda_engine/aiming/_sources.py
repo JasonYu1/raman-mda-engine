@@ -155,21 +155,26 @@ class PointsLayerSource(BaseSource):
     def _get_pos_points(self, points: np.ndarray, pos: int):
         return points[points[:, self._pos_idx] == pos][:, -2:]
 
-    def get_current_points(self) -> np.ndarray:
+    def get_current_points(self, transform:bool=True) -> np.ndarray:
         points = self._points.last_displayed()
         # put into [0, 1] for spectra collector
         points[:, 0] /= self._img_shape[0]
         points[:, 1] /= self._img_shape[1]
-        return self.transformer.transform(points)
+        if transform:
+            return self.transformer.transform(points)
+        return points
 
-    def get_mda_points(self, event: MDAEvent) -> np.ndarray:
+    def get_mda_points(self, event: MDAEvent, transform:bool=True) -> np.ndarray:
         p = event.index.get("p")
         points = self._get_pos_points(self._points.data, p)
 
         # put into [0, 1] for spectra collector
         points[:, 0] /= self._img_shape[0]
         points[:, 1] /= self._img_shape[1]
-        return self.transformer.transform(points)
+        if transform:
+            return self.transformer.transform(points)
+        return points
+    
 
 
 class ShapesLayerSource(BaseSource):
