@@ -375,6 +375,11 @@ class RamanEngine(MDAEngine):
         self._tracks[P] = tracked
         new_pts = np.array(new_pts)
 
+        # Ensure new_pts has at least shape (2, 2)
+        if new_pts.ndim < 2 or new_pts.shape[0] < 2 or new_pts.shape[1] < 2:
+            print(f"[WARNING] new_pts shape {new_pts.shape} is too small, recomputing from original points")
+            new_pts = points.copy()  # fall back to untransformed original points
+
         if not use_same_img:
             self._last_segments[P] = new_mask
         else:
