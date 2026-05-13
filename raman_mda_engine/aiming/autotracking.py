@@ -200,7 +200,7 @@ def track_one_T(labels: np.ndarray, scale: int, pts, radius: float = 5, threshol
 
     return tracked, new_aim
 
-def mask_outside_circle(img, circle_center=(430, 672), circle_radius=400):
+def mask_outside_circle(img, circle_center=(540, 740), circle_radius=400):
     h, w = img.shape
     Y, X = np.ogrid[:h, :w]
 
