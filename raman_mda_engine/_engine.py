@@ -69,7 +69,12 @@ class RamanEngine(MDAEngine):
         scale = 2,
         raman_glass_offset = 0.5,
         skip_imaging_for_same_pos = False,
-        autofocus_search_range=60
+        autofocus_search_range=60,
+        search_pts=20,
+        fine_search_range=1.5,
+        fine_search_pts=15,
+        image_x=1344,
+        image_y=1024,
     ) -> None:
         """
         Create a pymmcore-plus mda engine that also collects Raman data.
@@ -84,6 +89,19 @@ class RamanEngine(MDAEngine):
             If None use the default - or nothign if not importable
         sources : iterable
             Collection of aiming sources to aim the raman laser.
+        autofocus_search_range : float
+            +/- Z range (um) for the (coarse) autofocus scan.
+        search_pts : int
+            Number of Z planes in the coarse autofocus scan. Used by all
+            autofocus objects (quartz/glass/cell/software/laser-coarse).
+        fine_search_range : float
+            +/- Z range (um) for the laser autofocus FINE scan.
+        fine_search_pts : int
+            Number of Z planes in the laser autofocus FINE scan.
+        image_x : int
+            X size of the camera image in pixels.
+        image_y : int
+            Y size of the camera image in pixels.
         """
         super().__init__(mmc)
         self.raman_events = RamanSignaler()
@@ -105,6 +123,12 @@ class RamanEngine(MDAEngine):
         self._skip_imaging_for_same_pos = skip_imaging_for_same_pos
         self._last_operation_reloaded = False
         self._autofocus_search_range = autofocus_search_range
+        self._search_pts = search_pts
+        self._fine_search_range = fine_search_range
+        self._fine_search_pts = fine_search_pts
+        # image dimensions in pixels (X = 1344, Y = 1024 by default)
+        self._image_x = image_x
+        self._image_y = image_y
         if self._spectra_collector is None:
             try:
                 from raman_control import SpectraCollector
@@ -222,7 +246,7 @@ class RamanEngine(MDAEngine):
                     #     raise IndexError('Please pick two or more cells for each fov')
                     # new_points = new_points[N:]
                     ##########################
-                    xy = (np.array(new_points)*[1344, 1024])/self._scale
+                    xy = (np.array(new_points)*[self._image_x, self._image_y])/self._scale
                     mask = self._last_segments[p]
                     cell_id = mask[*np.mean(xy, axis=0).astype(int)]
                     m = mask == cell_id
@@ -240,7 +264,7 @@ class RamanEngine(MDAEngine):
         # )
         # self._mmc.setConfig(event.channel.group, "RM")
         self.try_set_config(event.channel.group, "RM")
-        volts = self._transformer.BF_to_volts((points*[1344, 1024])[:, :]/[1024, 1344], max_volts = self._max_volt)
+        volts = self._transformer.BF_to_volts((points*[self._image_x, self._image_y])[:, :]/[self._image_y, self._image_x], max_volts = self._max_volt)
         _ = self._spectra_collector.collect_spectra_pts(np.tile(volts[0], (2, 1)), 100)
         if not self._batch:
             spec = self._spectra_collector.collect_spectra_pts(
@@ -349,7 +373,7 @@ class RamanEngine(MDAEngine):
             # if ("autofocus" in source.name.lower()) and (self._autofocus_object in ['glass', 'quartz']):
             if "autofocus" in source.name.lower():
                 continue
-            new_points = source.get_mda_points(event, transform=False) * [1344, 1024]
+            new_points = source.get_mda_points(event, transform=False) * [self._image_x, self._image_y]
             points.append(new_points)
             which.extend([source.name] * len(new_points))
         points = np.vstack(points)
@@ -654,33 +678,37 @@ class RamanEngine(MDAEngine):
     def autofocus_w_raman(self, last_z, pt, t, p, max_volt=1.8):
         focusZ = self.try_get_ZPosition()
         object = self._autofocus_object
+        # NOTE: search_pts is now a single class-level argument (self._search_pts)
+        # used by every autofocus object for the coarse scan. (Previously quartz
+        # used 30 and the rest 20; set search_pts=30 on the engine if you want the
+        # old quartz density.)
         if object=='quartz':
             start=100
             end=380
             search_range=self._autofocus_search_range
-            search_pts=30
+            search_pts=self._search_pts
         elif object=='glass':
             start=1150
             end=1650
             search_range=self._autofocus_search_range
-            search_pts=20
+            search_pts=self._search_pts
         elif object=='cell':
             start=1300
             end=1370
-            search_range=10
-            search_pts=20
+            search_range=self._autofocus_search_range
+            search_pts=self._search_pts
         elif object=='software':
             search_range=self._autofocus_search_range
-            search_pts= 20
+            search_pts=self._search_pts
         elif object=='laser':
             search_range=self._autofocus_search_range
-            search_pts = 20
+            search_pts=self._search_pts
 
         if object in ['cell', 'glass', 'quartz']:
             self._daq.galvo.stop()
             self._mmc.stopSequenceAcquisition()
 
-            volts = self._transformer.BF_to_volts((pt.reshape(1, -1)*[1344, 1024])/[1024, 1344], max_volts=self._max_volt)
+            volts = self._transformer.BF_to_volts((pt.reshape(1, -1)*[self._image_x, self._image_y])/[self._image_y, self._image_x], max_volts=self._max_volt)
             # if object in ['glass', 'quartz']:
             #     # volts = np.array([0, 0])
             #     volts = np.array([[0,0], [0,0]])
@@ -765,7 +793,8 @@ class RamanEngine(MDAEngine):
             coarse_raman = None
 
         elif object == 'laser':
-            coarse_Z = np.linspace(-search_range, search_range, 8)
+            # --- coarse laser scan: uses class-level search_pts ---
+            coarse_Z = np.linspace(-search_range, search_range, search_pts)
             figs = []
             something_broke = 0
             self.try_set_config("Channel", "RM")
@@ -784,7 +813,8 @@ class RamanEngine(MDAEngine):
 
             coarse_max = coarse_Z[np.argmax(np.max(scores, axis=1))] + focusZ
 
-            fine_Z = np.linspace(-1.5, 1.5, 15)
+            # --- fine laser scan: uses dedicated fine_search_range / fine_search_pts ---
+            fine_Z = np.linspace(-self._fine_search_range, self._fine_search_range, self._fine_search_pts)
             figs = []
             something_broke = 0
             for z in tqdm(fine_Z):
