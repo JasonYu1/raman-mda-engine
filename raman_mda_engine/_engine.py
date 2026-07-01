@@ -73,6 +73,7 @@ class RamanEngine(MDAEngine):
         search_pts=20,
         fine_search_range=1.5,
         fine_search_pts=15,
+        refocus_every=1,
         image_x=1344,
         image_y=1024,
     ) -> None:
@@ -126,6 +127,7 @@ class RamanEngine(MDAEngine):
         self._search_pts = search_pts
         self._fine_search_range = fine_search_range
         self._fine_search_pts = fine_search_pts
+        self._refocus_every = max(1, int(refocus_every))
         # image dimensions in pixels (X = 1344, Y = 1024 by default)
         self._image_x = image_x
         self._image_y = image_y
@@ -860,8 +862,12 @@ class RamanEngine(MDAEngine):
                 if (t, pos) != self._last_pos:
                     self._last_pos = (t, pos)
 
+                    # Do we refresh focus / aiming on THIS timepoint?
+                    # t == 0 always runs (need a baseline mask + z per position);
+                    # after that, only every _refocus_every timepoints.
+                    do_refocus = (t == 0) or (t % self._refocus_every == 0)
+
                     # Establish a baseline best-z for this position.
-                    # Needed by BOTH autofocus and aiming, so it runs regardless of which is on.
                     if self._last_best_z.get(pos) is None:
                         self._last_best_z[pos] = event.z_pos - self._raman_glass_offset
                         print(self._last_best_z[pos])
@@ -869,9 +875,8 @@ class RamanEngine(MDAEngine):
                     else:
                         self.try_set_ZPosition(self._last_best_z[pos] + self._raman_glass_offset)
 
-                    # ---- Step 1: autofocus (runs first when both are enabled) ----
-                    did_autofocus = False
-                    if self._autofocus and pos in self._autofocus_p:
+                    # ---- Step 1: autofocus ----
+                    if self._autofocus and do_refocus and pos in self._autofocus_p:
                         points = None
                         for source in self.aiming_sources:
                             if 'autofocus' in source.name.lower():
@@ -884,10 +889,9 @@ class RamanEngine(MDAEngine):
                         )
                         print(f'autofocus z = {self._bestZ}')
                         self._last_best_z[pos] = self._bestZ
-                        did_autofocus = True
 
-                    # ---- Step 2: aiming update (independent of autofocus) ----
-                    if self._segment_and_track:
+                    # ---- Step 2: aiming update ----
+                    if self._segment_and_track and do_refocus:
                         self.try_set_ZPosition(self._last_best_z[pos] + self._raman_glass_offset)
                         time.sleep(0.5)
                         self.try_set_config(event.channel.group, "BF")
@@ -898,10 +902,6 @@ class RamanEngine(MDAEngine):
                             image = self._last_images[pos]
                         self._last_images[pos] = image
 
-                        # use_same_img == "reuse a neighbouring position's mask".
-                        # That optimization only makes sense when autofocus drives
-                        # imaging for a subset of positions. With autofocus off we
-                        # always have a fresh snap, so segment it directly.
                         if self._autofocus:
                             use_same = pos not in self._autofocus_p
                         else:
