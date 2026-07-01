@@ -666,7 +666,7 @@ class RamanEngine(MDAEngine):
         def focus_measure(image):
             """Variance of Laplacian focus metric."""
             lap = cv2.Laplacian(image, cv2.CV_64F).flatten()
-            q = 0.05
+            q = 0.15
             low = np.quantile(lap, q)
             high = np.quantile(lap, 1-q)
 
