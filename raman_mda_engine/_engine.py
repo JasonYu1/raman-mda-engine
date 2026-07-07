@@ -869,7 +869,8 @@ class RamanEngine(MDAEngine):
 
                     # Establish a baseline best-z for this position.
                     if self._last_best_z.get(pos) is None:
-                        self._last_best_z[pos] = event.z_pos - self._raman_glass_offset
+                        # self._last_best_z[pos] = event.z_pos - self._raman_glass_offset
+                        self._last_best_z[pos] = event.z_pos
                         print(self._last_best_z[pos])
                         self.try_set_ZPosition(self._last_best_z[pos])
                     else:
