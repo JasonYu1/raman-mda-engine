@@ -802,6 +802,8 @@ class RamanEngine(MDAEngine):
 
         elif object == 'laser':
             # --- coarse laser scan: uses class-level search_pts ---
+            volts = self._transformer.BF_to_volts((pt.reshape(1, -1)*[self._image_x, self._image_y])/[self._image_y, self._image_x], max_volts=self._max_volt)
+            spec = self._spectra_collector.collect_spectra_pts(np.array([volts[0], volts[0]]), 100)
             coarse_Z = np.linspace(-search_range, search_range, search_pts)
             figs = []
             something_broke = 0
