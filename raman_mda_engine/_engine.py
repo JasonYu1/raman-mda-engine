@@ -76,6 +76,7 @@ class RamanEngine(MDAEngine):
         refocus_every=1,
         image_x=1344,
         image_y=1024,
+        config_file: str = "test3.cfg",
     ) -> None:
         """
         Create a pymmcore-plus mda engine that also collects Raman data.
@@ -131,6 +132,8 @@ class RamanEngine(MDAEngine):
         # image dimensions in pixels (X = 1344, Y = 1024 by default)
         self._image_x = image_x
         self._image_y = image_y
+        self._config_file = config_file
+
         if self._spectra_collector is None:
             try:
                 from raman_control import SpectraCollector
@@ -466,7 +469,10 @@ class RamanEngine(MDAEngine):
                     None
 
                 self._mmc.unloadAllDevices()
-                self._mmc.loadSystemConfiguration("test3.cfg")
+                if self._config_file is None:
+                    self._mmc.loadSystemConfiguration("test3.cfg")
+                else:
+                    self._mmc.loadSystemConfiguration(self._config_file)
                 self._mmc.waitForSystem()
                 # QTimer.singleShot(0, lambda: self._mmc.unloadAllDevices())
                 # QTimer.singleShot(0, lambda: self._mmc.loadSystemConfiguration("test3.cfg"))
