@@ -851,82 +851,165 @@ class RamanEngine(MDAEngine):
             return focusZ, last_z, coarse_raman
 
         return focusZ, max_laser_offset+focusZ, coarse_raman
-
+    
+    
     def setup_event(self, event: MDAEvent) -> None:
         if event.x_pos is not None or event.y_pos is not None or event.z_pos is not None:
             x = event.x_pos if event.x_pos is not None else self._mmc.getXPosition()
             y = event.y_pos if event.y_pos is not None else self._mmc.getYPosition()
-            # z = event.z_pos if event.z_pos is not None else self.try_get_ZPosition()
             self.try_set_XYPosition(x, y)
-            # print(event.x_pos, event.y_pos, event.z_pos)
-            # self.try_set_ZPosition(z)
-
         if event.channel is not None:
             self.try_set_config(event.channel.group, event.channel.config)
-
-        if event.z_pos is not None:
-            if self._autofocus or self._segment_and_track:
-                pos = event.index["p"]
-                t = event.index.get("t", 0)
-                # fire once per (timepoint, position) -- robust to single position
-                if (t, pos) != self._last_pos:
-                    self._last_pos = (t, pos)
-
-                    # Do we refresh focus / aiming on THIS timepoint?
-                    # t == 0 always runs (need a baseline mask + z per position);
-                    # after that, only every _refocus_every timepoints.
-                    do_refocus = (t == 0) or (t % self._refocus_every == 0)
-
-                    # Establish a baseline best-z for this position.
-                    if self._last_best_z.get(pos) is None:
-                        # self._last_best_z[pos] = event.z_pos - self._raman_glass_offset
-                        self._last_best_z[pos] = event.z_pos
-                        print(self._last_best_z[pos])
-                        self.try_set_ZPosition(self._last_best_z[pos])
+        if self._autofocus or self._segment_and_track:
+            pos = event.index.get("p", 0)
+            t = event.index.get("t", 0)
+            # fire once per (timepoint, position) -- robust to single position
+            if (t, pos) != self._last_pos:
+                self._last_pos = (t, pos)
+                # Do we refresh focus / aiming on THIS timepoint?
+                # t == 0 always runs (need a baseline mask + z per position);
+                # after that, only every _refocus_every timepoints.
+                do_refocus = (t == 0) or (t % self._refocus_every == 0)
+                # ---- Baseline best-z for this position ----
+                if self._last_best_z.get(pos) is None:
+                    if pos in self._autofocus_p or not self._last_best_z:
+                        # autofocus position (or the very first position):
+                        # trust the sequence z as the starting point
+                        base = event.z_pos
+                        if base is None:
+                            base = self.try_get_ZPosition()
                     else:
-                        self.try_set_ZPosition(self._last_best_z[pos] + self._raman_glass_offset)
-
-                    # ---- Step 1: autofocus ----
-                    if self._autofocus and do_refocus and pos in self._autofocus_p:
-                        points = None
-                        for source in self.aiming_sources:
-                            if 'autofocus' in source.name.lower():
-                                points = source.get_mda_points(event, transform=False)
-                        pt = np.array(points[0])
-
-                        print('-----------Autofocusing-----------')
-                        _, self._bestZ, _ = self.autofocus_w_raman(
-                            self._last_best_z[pos], pt, event.index["t"], event.index["p"]
-                        )
-                        print(f'autofocus z = {self._bestZ}')
-                        self._last_best_z[pos] = self._bestZ
-
-                    # ---- Step 2: aiming update ----
-                    if self._segment_and_track and do_refocus:
-                        self.try_set_ZPosition(self._last_best_z[pos] + self._raman_glass_offset)
-                        time.sleep(0.5)
-                        self.try_set_config(event.channel.group, "BF")
-                        self.try_setExp(10)
-                        self.try_snap_image()
-                        image = self.try_get_image()
-                        if self._last_operation_reloaded and pos in self._last_images:
-                            image = self._last_images[pos]
-                        self._last_images[pos] = image
-
-                        if self._autofocus:
-                            use_same = pos not in self._autofocus_p
-                        else:
-                            use_same = False
-
-                        self.update_aim(pos, event, image, use_same_img=use_same)
-                        self.try_set_ZPosition(self._last_best_z[pos])
-
-                self.try_set_ZPosition(self._last_best_z[pos] + self._z_rel[event.index["z"]])
-            else:
-                self.try_set_ZPosition(event.z_pos)
-
+                        # non-autofocus position: inherit the most recent
+                        # best-z (carries the last autofocus correction)
+                        # instead of the stale sequence z / wherever the
+                        # previous position's z-stack finished
+                        base = self._last_best_z[max(self._last_best_z.keys())]
+                    self._last_best_z[pos] = base
+                    print(f"[baseline z] pos={pos}: {base}")
+                    self.try_set_ZPosition(self._last_best_z[pos])
+                else:
+                    self.try_set_ZPosition(
+                        self._last_best_z[pos] + self._raman_glass_offset
+                    )
+                # ---- Step 1: autofocus ----
+                if self._autofocus and do_refocus and pos in self._autofocus_p:
+                    points = None
+                    for source in self.aiming_sources:
+                        if 'autofocus' in source.name.lower():
+                            points = source.get_mda_points(event, transform=False)
+                    pt = np.array(points[0])
+                    print('-----------Autofocusing-----------')
+                    _, self._bestZ, _ = self.autofocus_w_raman(
+                        self._last_best_z[pos], pt, t, pos
+                    )
+                    print(f'autofocus z = {self._bestZ}')
+                    self._last_best_z[pos] = self._bestZ
+                # ---- Step 2: aiming update ----
+                if self._segment_and_track and do_refocus:
+                    self.try_set_ZPosition(
+                        self._last_best_z[pos] + self._raman_glass_offset
+                    )
+                    time.sleep(0.5)
+                    self.try_set_config(event.channel.group, "BF")
+                    self.try_setExp(10)
+                    self.try_snap_image()
+                    image = self.try_get_image()
+                    if self._last_operation_reloaded and pos in self._last_images:
+                        image = self._last_images[pos]
+                    self._last_images[pos] = image
+                    if self._autofocus:
+                        use_same = pos not in self._autofocus_p
+                    else:
+                        use_same = False
+                    self.update_aim(pos, event, image, use_same_img=use_same)
+                    self.try_set_ZPosition(self._last_best_z[pos])
+            # per-plane z: ALWAYS runs, even when event.z_pos is None,
+            # so the stage can never silently stay at the previous
+            # position's last plane
+            if "z" in event.index:
+                self.try_set_ZPosition(
+                    self._last_best_z[pos] + self._z_rel[event.index["z"]]
+                )
+        elif event.z_pos is not None:
+            self.try_set_ZPosition(event.z_pos)
         if event.exposure is not None:
             self._mmc.setExposure(event.exposure)
+
+    # def setup_event(self, event: MDAEvent) -> None:
+    #     if event.x_pos is not None or event.y_pos is not None or event.z_pos is not None:
+    #         x = event.x_pos if event.x_pos is not None else self._mmc.getXPosition()
+    #         y = event.y_pos if event.y_pos is not None else self._mmc.getYPosition()
+    #         # z = event.z_pos if event.z_pos is not None else self.try_get_ZPosition()
+    #         self.try_set_XYPosition(x, y)
+    #         # print(event.x_pos, event.y_pos, event.z_pos)
+    #         # self.try_set_ZPosition(z)
+
+    #     if event.channel is not None:
+    #         self.try_set_config(event.channel.group, event.channel.config)
+
+    #     if event.z_pos is not None:
+    #         if self._autofocus or self._segment_and_track:
+    #             pos = event.index["p"]
+    #             t = event.index.get("t", 0)
+    #             # fire once per (timepoint, position) -- robust to single position
+    #             if (t, pos) != self._last_pos:
+    #                 self._last_pos = (t, pos)
+
+    #                 # Do we refresh focus / aiming on THIS timepoint?
+    #                 # t == 0 always runs (need a baseline mask + z per position);
+    #                 # after that, only every _refocus_every timepoints.
+    #                 do_refocus = (t == 0) or (t % self._refocus_every == 0)
+
+    #                 # Establish a baseline best-z for this position.
+    #                 if self._last_best_z.get(pos) is None:
+    #                     # self._last_best_z[pos] = event.z_pos - self._raman_glass_offset
+    #                     self._last_best_z[pos] = event.z_pos
+    #                     print(self._last_best_z[pos])
+    #                     self.try_set_ZPosition(self._last_best_z[pos])
+    #                 else:
+    #                     self.try_set_ZPosition(self._last_best_z[pos] + self._raman_glass_offset)
+
+    #                 # ---- Step 1: autofocus ----
+    #                 if self._autofocus and do_refocus and pos in self._autofocus_p:
+    #                     points = None
+    #                     for source in self.aiming_sources:
+    #                         if 'autofocus' in source.name.lower():
+    #                             points = source.get_mda_points(event, transform=False)
+    #                     pt = np.array(points[0])
+
+    #                     print('-----------Autofocusing-----------')
+    #                     _, self._bestZ, _ = self.autofocus_w_raman(
+    #                         self._last_best_z[pos], pt, event.index["t"], event.index["p"]
+    #                     )
+    #                     print(f'autofocus z = {self._bestZ}')
+    #                     self._last_best_z[pos] = self._bestZ
+
+    #                 # ---- Step 2: aiming update ----
+    #                 if self._segment_and_track and do_refocus:
+    #                     self.try_set_ZPosition(self._last_best_z[pos] + self._raman_glass_offset)
+    #                     time.sleep(0.5)
+    #                     self.try_set_config(event.channel.group, "BF")
+    #                     self.try_setExp(10)
+    #                     self.try_snap_image()
+    #                     image = self.try_get_image()
+    #                     if self._last_operation_reloaded and pos in self._last_images:
+    #                         image = self._last_images[pos]
+    #                     self._last_images[pos] = image
+
+    #                     if self._autofocus:
+    #                         use_same = pos not in self._autofocus_p
+    #                     else:
+    #                         use_same = False
+
+    #                     self.update_aim(pos, event, image, use_same_img=use_same)
+    #                     self.try_set_ZPosition(self._last_best_z[pos])
+
+    #             self.try_set_ZPosition(self._last_best_z[pos] + self._z_rel[event.index["z"]])
+    #         else:
+    #             self.try_set_ZPosition(event.z_pos)
+
+    #     if event.exposure is not None:
+    #         self._mmc.setExposure(event.exposure)
 
 
 
