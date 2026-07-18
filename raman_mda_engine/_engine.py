@@ -67,6 +67,10 @@ class RamanEngine(MDAEngine):
         autofocus_object='quartz',
         image_p=np.array([0]),
         segment_and_track=True,
+        segment_channel='BF',
+        segment_crop=True,
+        cellpose_model='cyto2',
+        tracking_config='particle_config.json',
         scale = 2,
         raman_glass_offset = 0.5,
         skip_imaging_for_same_pos = False,
@@ -122,6 +126,10 @@ class RamanEngine(MDAEngine):
         self._autofocus_p = autofocus_p
         self._image_p = image_p
         self._segment_and_track = segment_and_track
+        self._segment_channel = segment_channel
+        self._segment_crop = segment_crop
+        self._cellpose_model = cellpose_model
+        self._tracking_config = tracking_config
         self._scale = scale
         self._raman_glass_offset = raman_glass_offset
         self._skip_imaging_for_same_pos = skip_imaging_for_same_pos
@@ -247,12 +255,7 @@ class RamanEngine(MDAEngine):
         for source in self.aiming_sources:
             new_points = source.get_mda_points(event)
             if 'cell' in source.name.lower():
-                if self._batch:
-                    # N = source.transformer.multiplier
-                    # if N == new_points.shape[0]:
-                    #     raise IndexError('Please pick two or more cells for each fov')
-                    # new_points = new_points[N:]
-                    ##########################
+                if self._batch and self._segment_and_track:
                     xy = (np.array(new_points)*[self._image_x, self._image_y])/self._scale
                     mask = self._last_segments[p]
                     cell_id = mask[*np.mean(xy, axis=0).astype(int)]
@@ -265,11 +268,6 @@ class RamanEngine(MDAEngine):
                 points.append(new_points) # must be inside the loop
                 which.extend([source.name] * len(new_points))
         points = np.vstack(points)
-
-        # spec = self._spectra_collector.collect_spectra_relative(
-        #     points, self._default_rm_exp
-        # )
-        # self._mmc.setConfig(event.channel.group, "RM")
         self.try_set_config(event.channel.group, "RM")
         volts = self._transformer.BF_to_volts((points*[self._image_x, self._image_y])[:, :]/[self._image_y, self._image_x], max_volts = self._max_volt)
         _ = self._spectra_collector.collect_spectra_pts(np.tile(volts[0], (2, 1)), 100)
@@ -392,8 +390,11 @@ class RamanEngine(MDAEngine):
         # fresh BF snap right before every call, so a fresh segmentation is the
         # correct default. `use_same_img` only controls whether we *reuse* a
         # neighbouring position's mask instead of this one.
-        new_mask = segment_single_img(img, self._scale)
-
+        new_mask = segment_single_img(
+            img, self._scale,
+            crop=self._segment_crop,
+            cellpose_model=self._cellpose_model,
+        )
         # Decide whether reusing the previous position's mask is even possible.
         can_reuse = (
             use_same_img
@@ -415,10 +416,14 @@ class RamanEngine(MDAEngine):
             tracked, new_pts = track_one_T(
                 labels, self._scale, points,
                 tracked=self._tracks.get(P - 1), use_same_img=True,
+                tracking_config=self._tracking_config,
             )
         else:
             labels = np.vstack([prev[None, :], new_mask[None, :]])
-            tracked, new_pts = track_one_T(labels, self._scale, points, use_same_img=False)
+            tracked, new_pts = track_one_T(
+                labels, self._scale, points, use_same_img=False,
+                tracking_config=self._tracking_config,
+            )
 
         self._tracks[P] = tracked
         new_pts = np.array(new_pts)
@@ -724,7 +729,7 @@ class RamanEngine(MDAEngine):
             #     volts = np.array([[0,0], [0,0]])
 
             self.try_set_config("Channel", "RM")
-            self.try_setShutter("Fluoshutter", True)
+            # self.try_setShutter("Fluoshutter", True)
 
             coarse_Z = np.linspace(-search_range, search_range, search_pts)
             coarse_raman = []
@@ -846,7 +851,7 @@ class RamanEngine(MDAEngine):
             max_laser_offset = fine_Z[np.argmax(np.max(scores, axis=1))] - focusZ + coarse_max - self._raman_glass_offset
             coarse_raman = None
 
-        self.try_setShutter("Fluoshutter", False)
+        # self.try_setShutter("Fluoshutter", False)
         if np.abs(max_laser_offset) >= 3*search_range or something_broke != 0:
             return focusZ, last_z, coarse_raman
 
@@ -910,7 +915,7 @@ class RamanEngine(MDAEngine):
                         self._last_best_z[pos] + self._raman_glass_offset
                     )
                     time.sleep(0.5)
-                    self.try_set_config(event.channel.group, "BF")
+                    self.try_set_config(event.channel.group, self._segment_channel)
                     self.try_setExp(10)
                     self.try_snap_image()
                     image = self.try_get_image()
@@ -934,91 +939,14 @@ class RamanEngine(MDAEngine):
             self.try_set_ZPosition(event.z_pos)
         if event.exposure is not None:
             self._mmc.setExposure(event.exposure)
-
-    # def setup_event(self, event: MDAEvent) -> None:
-    #     if event.x_pos is not None or event.y_pos is not None or event.z_pos is not None:
-    #         x = event.x_pos if event.x_pos is not None else self._mmc.getXPosition()
-    #         y = event.y_pos if event.y_pos is not None else self._mmc.getYPosition()
-    #         # z = event.z_pos if event.z_pos is not None else self.try_get_ZPosition()
-    #         self.try_set_XYPosition(x, y)
-    #         # print(event.x_pos, event.y_pos, event.z_pos)
-    #         # self.try_set_ZPosition(z)
-
-    #     if event.channel is not None:
-    #         self.try_set_config(event.channel.group, event.channel.config)
-
-    #     if event.z_pos is not None:
-    #         if self._autofocus or self._segment_and_track:
-    #             pos = event.index["p"]
-    #             t = event.index.get("t", 0)
-    #             # fire once per (timepoint, position) -- robust to single position
-    #             if (t, pos) != self._last_pos:
-    #                 self._last_pos = (t, pos)
-
-    #                 # Do we refresh focus / aiming on THIS timepoint?
-    #                 # t == 0 always runs (need a baseline mask + z per position);
-    #                 # after that, only every _refocus_every timepoints.
-    #                 do_refocus = (t == 0) or (t % self._refocus_every == 0)
-
-    #                 # Establish a baseline best-z for this position.
-    #                 if self._last_best_z.get(pos) is None:
-    #                     # self._last_best_z[pos] = event.z_pos - self._raman_glass_offset
-    #                     self._last_best_z[pos] = event.z_pos
-    #                     print(self._last_best_z[pos])
-    #                     self.try_set_ZPosition(self._last_best_z[pos])
-    #                 else:
-    #                     self.try_set_ZPosition(self._last_best_z[pos] + self._raman_glass_offset)
-
-    #                 # ---- Step 1: autofocus ----
-    #                 if self._autofocus and do_refocus and pos in self._autofocus_p:
-    #                     points = None
-    #                     for source in self.aiming_sources:
-    #                         if 'autofocus' in source.name.lower():
-    #                             points = source.get_mda_points(event, transform=False)
-    #                     pt = np.array(points[0])
-
-    #                     print('-----------Autofocusing-----------')
-    #                     _, self._bestZ, _ = self.autofocus_w_raman(
-    #                         self._last_best_z[pos], pt, event.index["t"], event.index["p"]
-    #                     )
-    #                     print(f'autofocus z = {self._bestZ}')
-    #                     self._last_best_z[pos] = self._bestZ
-
-    #                 # ---- Step 2: aiming update ----
-    #                 if self._segment_and_track and do_refocus:
-    #                     self.try_set_ZPosition(self._last_best_z[pos] + self._raman_glass_offset)
-    #                     time.sleep(0.5)
-    #                     self.try_set_config(event.channel.group, "BF")
-    #                     self.try_setExp(10)
-    #                     self.try_snap_image()
-    #                     image = self.try_get_image()
-    #                     if self._last_operation_reloaded and pos in self._last_images:
-    #                         image = self._last_images[pos]
-    #                     self._last_images[pos] = image
-
-    #                     if self._autofocus:
-    #                         use_same = pos not in self._autofocus_p
-    #                     else:
-    #                         use_same = False
-
-    #                     self.update_aim(pos, event, image, use_same_img=use_same)
-    #                     self.try_set_ZPosition(self._last_best_z[pos])
-
-    #             self.try_set_ZPosition(self._last_best_z[pos] + self._z_rel[event.index["z"]])
-    #         else:
-    #             self.try_set_ZPosition(event.z_pos)
-
-    #     if event.exposure is not None:
-    #         self._mmc.setExposure(event.exposure)
-
-
+  
 
     def exec_event(self, event: MDAEvent) -> Any:
         if self._rm_meta:
             if event.channel.config == self._rm_channel and event.index["z"] in self._rm_z:
-                self.try_setShutter("Fluoshutter", True)
+                # self.try_setShutter("Fluoshutter", True)
                 self.record_raman(event)
-                self.try_setShutter("Fluoshutter", False)
+                # self.try_setShutter("Fluoshutter", False)
                 self.try_set_config(event.channel.group, "BF")
 
         if self._skip_imaging_for_same_pos:
