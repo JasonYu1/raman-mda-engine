@@ -65,6 +65,7 @@ class RamanEngine(MDAEngine):
         autofocus=True,
         autofocus_p=np.array([0]),
         autofocus_object='quartz',
+        image_p=np.array([0]),
         segment_and_track=True,
         scale = 2,
         raman_glass_offset = 0.5,
@@ -119,6 +120,7 @@ class RamanEngine(MDAEngine):
         self._autofocus = autofocus
         self._autofocus_object = autofocus_object
         self._autofocus_p = autofocus_p
+        self._image_p = image_p
         self._segment_and_track = segment_and_track
         self._scale = scale
         self._raman_glass_offset = raman_glass_offset
@@ -937,7 +939,7 @@ class RamanEngine(MDAEngine):
                 self.try_set_config(event.channel.group, "BF")
 
         if self._skip_imaging_for_same_pos:
-            if event.index["p"] in self._autofocus_p:
+            if event.index["p"] in self._image_p:
                 self.try_snap_image()
                 if (
                     # TODO MAKE UPDATING THIS AUTOMATIC
