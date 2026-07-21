@@ -73,6 +73,8 @@ class RamanEngine(MDAEngine):
         image_x=1344,
         image_y=1024,
         config_file: str = "test3.cfg",
+        circle_center=(540, 740),
+        circle_radius=100
     ) -> None:
         """
         Create a pymmcore-plus mda engine that also collects Raman data.
@@ -140,6 +142,8 @@ class RamanEngine(MDAEngine):
         self._image_x = image_x
         self._image_y = image_y
         self._config_file = config_file
+        self._circle_center = circle_center
+        self._circle_radius = circle_radius
         if self._spectra_collector is None:
             try:
                 from raman_control import SpectraCollector
@@ -359,6 +363,8 @@ class RamanEngine(MDAEngine):
             img, self._scale,
             crop=self._segment_crop,
             cellpose_model=self._cellpose_model,
+            circle_center=self._circle_center,
+            circle_radius=self._circle_radius
         )
         # Decide whether reusing the previous position's mask is even possible.
         can_reuse = (
@@ -605,6 +611,23 @@ class RamanEngine(MDAEngine):
                 return  # success!
             except RuntimeError:
                 n += 1  # increase wait time and retry
+    def try_setAutoShutter(self, boolean, N=2):
+        n = 0  # starting sleep time
+        for attempt in range(N):
+            if attempt == int(N/2):
+                print('set shutter reach maxiter, reloading...')
+                self.reload()
+            try:
+                time.sleep(n)
+                self._mmc.setAutoShutter(boolean)
+                self._mmc.waitForSystem()
+                # QTimer.singleShot(0, lambda: self._mmc.setShutterOpen(shutter, boolean))
+                # QTimer.singleShot(0, lambda: self._mmc.waitForSystem())
+                # time.sleep(0.25)
+                return  # success!
+            except RuntimeError:
+                n += 1  # increase wait time and retry
+
     def software_autofocus(self, stack):
         """
         stack: numpy array of shape (N, X, Y)
@@ -626,6 +649,7 @@ class RamanEngine(MDAEngine):
     def autofocus_w_raman(self, last_z, pt, t, p, max_volt=1.8):
         focusZ = self.try_get_ZPosition()
         object = self._autofocus_object
+        shutter = self._shutter_device or "Fluoshutter"
         # NOTE: search_pts is now a single class-level argument (self._search_pts)
         # used by every autofocus object for the coarse scan. (Previously quartz
         # used 30 and the rest 20; set search_pts=30 on the engine if you want the
@@ -735,6 +759,8 @@ class RamanEngine(MDAEngine):
             coarse_Z = np.linspace(-search_range, search_range, search_pts)
             figs = []
             something_broke = 0
+            self.try_setAutoShutter(False) # check later
+            self.try_setShutter(shutter, True)
             self.try_set_config("Channel", "RM")
             for z in tqdm(coarse_Z):
                 self.try_set_ZPosition(focusZ+z)
@@ -766,6 +792,8 @@ class RamanEngine(MDAEngine):
             scores = figs.sum(axis=1)
             max_laser_offset = fine_Z[np.argmax(np.max(scores, axis=1))] - focusZ + coarse_max - self._raman_glass_offset
             coarse_raman = None
+            self.try_setShutter(shutter, False)
+            self.try_setAutoShutter(True) # check later
         # self.try_setShutter("Fluoshutter", False)
         if np.abs(max_laser_offset) >= 3*search_range or something_broke != 0:
             return focusZ, last_z, coarse_raman

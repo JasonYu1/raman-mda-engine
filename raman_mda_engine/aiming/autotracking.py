@@ -96,24 +96,20 @@ def track_one_T(labels: np.ndarray, scale: int, pts, radius: float = 5, threshol
 def mask_outside_circle(img, circle_center=(540, 740), circle_radius=400):
     h, w = img.shape
     Y, X = np.ogrid[:h, :w]
-
-    dist_sq = (X - circle_center[0])**2 + (Y - circle_center[1])**2
-
-    mask = dist_sq <= circle_radius**2
-
+    cy, cx = circle_center
+    dist_sq = (Y - cy) ** 2 + (X - cx) ** 2
+    mask = dist_sq <= circle_radius ** 2
     masked_img = img.copy()
     masked_img[~mask] = img.min()
-
     return masked_img
 
-
-def segment_single_img(img: np.ndarray, scale: int = 4, crop=True, cellpose_model='cyto2'):
+def segment_single_img(img: np.ndarray, scale: int = 4, crop=True, cellpose_model='cyto2', circle_center=(540, 740), circle_radius=100):
     model = Cellpose(model_type = cellpose_model, gpu=False)
     channels = [[0, 0]]
 
     # seg_imgs = img[::scale, ::scale]
     if crop:
-        img = mask_outside_circle(img)
+        img = mask_outside_circle(img, circle_center=circle_center, circle_radius=circle_radius)
     seg_imgs = rescale(img, 1 / scale, anti_aliasing=True)
     seg_imgs = (seg_imgs - seg_imgs.min()) / (seg_imgs.max() - seg_imgs.min())
     
