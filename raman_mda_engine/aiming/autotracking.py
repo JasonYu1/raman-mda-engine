@@ -10,6 +10,7 @@ from pathlib import Path
 from scipy.ndimage import center_of_mass
 
 __all__= [
+    "CellposeSegmenter",
     "track_one_T",
     "segment_single_img",
     "find_com",
@@ -72,15 +73,35 @@ def track_one_T(labels: np.ndarray, scale: int, pts, radius: float = 5, threshol
         if label == 0:
             new_label = tracked[1, pt[0], pt[1]]
             if new_label == 0:
-                id = np.unique(tracked[1])
-                id = id[id != 0]
-                coms = np.array([center_of_mass(tracked[1] == i) for i in id])
+                ids = np.unique(tracked[1])
+                ids = ids[ids != 0]
+                if len(ids) == 0:
+                    print(
+                        f"lost tracking of a cell {pt * scale}, "
+                        "current mask contains no cells; retaining original point"
+                    )
+                    new_aim.append((pt * scale).astype(int))
+                    continue
+                coms = np.asarray(
+                    [center_of_mass(tracked[1] == label_id) for label_id in ids],
+                    dtype=float,
+                ).reshape(-1, 2)
+                finite = np.isfinite(coms).all(axis=1)
+                ids = ids[finite]
+                coms = coms[finite]
+                if len(coms) == 0:
+                    print(
+                        f"lost tracking of a cell {pt * scale}, "
+                        "cell centers are invalid; retaining original point"
+                    )
+                    new_aim.append((pt * scale).astype(int))
+                    continue
                 dists = np.linalg.norm(coms - pt, axis=1)
                 if len(dists) == 0 or np.min(dists) > 3 * threshold / scale:
                     print(f"lost tracking of a cell {pt * scale}, no potential cells within threshold")
                     new_aim.append((pt * scale).astype(int))
                 else:
-                    new_id = id[np.argmin(dists)]
+                    new_id = ids[np.argmin(dists)]
                     print(f"lost tracking of a cell {pt * scale}, moved to closest point within threshold")
                     new_aim.append((np.array(center_of_mass(tracked[1] == new_id)) * scale))
             else:
@@ -103,29 +124,145 @@ def mask_outside_circle(img, circle_center=(540, 740), circle_radius=400):
     masked_img[~mask] = img.min()
     return masked_img
 
-def segment_single_img(img: np.ndarray, scale: int = 4, crop=True, cellpose_model='cyto2', circle_center=(540, 740), circle_radius=100):
-    model = Cellpose(model_type = cellpose_model, gpu=False)
-    channels = [[0, 0]]
+class CellposeSegmenter:
+    """Reusable Cellpose segmentation with optional true ROI cropping.
 
-    # seg_imgs = img[::scale, ::scale]
-    if crop:
-        img = mask_outside_circle(img, circle_center=circle_center, circle_radius=circle_radius)
-    seg_imgs = rescale(img, 1 / scale, anti_aliasing=True)
-    seg_imgs = (seg_imgs - seg_imgs.min()) / (seg_imgs.max() - seg_imgs.min())
-    
-    masks, flow, styles = model.cp.eval(
-        seg_imgs,
-        batch_size=1024,
-        channels=channels,
-        diameter=50/scale,
-        flow_threshold=0.6,
-        cellprob_threshold=-2,
-        normalize=False,
-        # tile=False,
-        # tile_overlap=0
+    Returned masks keep the historical ``segment_single_img`` contract: their
+    coordinates are the full camera coordinates divided by ``scale``.  This is
+    required by ``track_one_T``, which applies the same scale to aiming points.
+    """
+
+    def __init__(self, cellpose_model="cyto2", gpu=False, model_factory=None):
+        self.cellpose_model = str(cellpose_model)
+        self.gpu = bool(gpu)
+        self._model_factory = model_factory or Cellpose
+        self._model = None
+
+    @property
+    def model(self):
+        """Load the requested Cellpose model only on first use."""
+        if self._model is None:
+            self._model = self._model_factory(
+                model_type=self.cellpose_model,
+                gpu=self.gpu,
+            )
+        return self._model
+
+    def segment(
+        self,
+        img: np.ndarray,
+        scale: int = 4,
+        crop=True,
+        circle_center=(540, 740),
+        circle_radius=100,
+        crop_padding=4,
+    ) -> np.ndarray:
+        """Segment an image while preserving downscaled global coordinates."""
+        img = np.asarray(img)
+        if img.ndim != 2:
+            raise ValueError("img must be a two-dimensional image")
+        scale = int(scale)
+        if scale < 1:
+            raise ValueError("scale must be at least one")
+        if circle_radius < 0:
+            raise ValueError("circle_radius cannot be negative")
+        if crop_padding < 0:
+            raise ValueError("crop_padding cannot be negative")
+
+        full_scaled_shape = tuple(
+            np.maximum(1, np.round(np.asarray(img.shape) / scale).astype(int))
+        )
+        y0 = x0 = 0
+        segment_img = img
+        local_center = circle_center
+
+        if crop:
+            center = np.asarray(circle_center, dtype=float)
+            if center.shape != (2,):
+                raise ValueError("circle_center must contain one (y, x) pair")
+            extent = float(circle_radius) + float(crop_padding)
+            y0 = max(0, int(np.floor((center[0] - extent) / scale)) * scale)
+            x0 = max(0, int(np.floor((center[1] - extent) / scale)) * scale)
+            y1 = min(
+                img.shape[0],
+                int(np.ceil((center[0] + extent + 1) / scale)) * scale,
+            )
+            x1 = min(
+                img.shape[1],
+                int(np.ceil((center[1] + extent + 1) / scale)) * scale,
+            )
+            if y1 <= y0 or x1 <= x0:
+                raise ValueError("The segmentation circle does not overlap the image")
+            segment_img = img[y0:y1, x0:x1]
+            local_center = (center[0] - y0, center[1] - x0)
+            segment_img = mask_outside_circle(
+                segment_img,
+                circle_center=local_center,
+                circle_radius=circle_radius,
+            )
+
+        scaled_img = rescale(segment_img, 1 / scale, anti_aliasing=True)
+        value_range = float(scaled_img.max() - scaled_img.min())
+        if value_range > 0:
+            scaled_img = (scaled_img - scaled_img.min()) / value_range
+        else:
+            scaled_img = np.zeros_like(scaled_img, dtype=float)
+
+        masks, _, _ = self.model.cp.eval(
+            scaled_img,
+            batch_size=1024,
+            channels=[[0, 0]],
+            diameter=50 / scale,
+            flow_threshold=0.6,
+            cellprob_threshold=-2,
+            normalize=False,
+        )
+        masks = np.asarray(masks)
+        if not crop:
+            return masks
+
+        full_mask = np.zeros(full_scaled_shape, dtype=masks.dtype)
+        target_y0 = y0 // scale
+        target_x0 = x0 // scale
+        target_y1 = min(full_mask.shape[0], target_y0 + masks.shape[0])
+        target_x1 = min(full_mask.shape[1], target_x0 + masks.shape[1])
+        source_y1 = target_y1 - target_y0
+        source_x1 = target_x1 - target_x0
+        full_mask[target_y0:target_y1, target_x0:target_x1] = masks[
+            :source_y1,
+            :source_x1,
+        ]
+        return full_mask
+
+
+_SEGMENTER_CACHE = {}
+
+
+def segment_single_img(
+    img: np.ndarray,
+    scale: int = 4,
+    crop=True,
+    cellpose_model="cyto2",
+    circle_center=(540, 740),
+    circle_radius=100,
+    segmenter=None,
+    crop_padding=4,
+):
+    """Segment one image using a cached model and an actual circular ROI."""
+    if segmenter is None:
+        key = (str(cellpose_model), False)
+        segmenter = _SEGMENTER_CACHE.get(key)
+        if segmenter is None:
+            segmenter = CellposeSegmenter(cellpose_model=cellpose_model, gpu=False)
+            _SEGMENTER_CACHE[key] = segmenter
+    return segmenter.segment(
+        img,
+        scale=scale,
+        crop=crop,
+        circle_center=circle_center,
+        circle_radius=circle_radius,
+        crop_padding=crop_padding,
     )
-    
-    return masks
 
 
 def find_com(img: np.ndarray, pt_xy: np.ndarray, scale: int=4, dist_thres: float=80, plot=False, cellpose_model='cyto2')->np.ndarray:

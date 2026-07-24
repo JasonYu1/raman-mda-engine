@@ -2,7 +2,12 @@ from __future__ import annotations
 import time
 from numbers import Real
 from typing import TYPE_CHECKING, Any, NamedTuple
-from raman_mda_engine.aiming.autotracking import update_pos_points, segment_single_img, track_one_T
+from raman_mda_engine.aiming.autotracking import (
+    CellposeSegmenter,
+    segment_single_img,
+    track_one_T,
+    update_pos_points,
+)
 # from cns_control.autofocus import autofocus_w_raman
 from pymmcore_plus.mda._engine import ImagePayload
 import numpy as np
@@ -128,6 +133,7 @@ class RamanEngine(MDAEngine):
         self._shutter_device = shutter_device
         self._segment_crop = segment_crop
         self._cellpose_model = cellpose_model
+        self._cellpose_segmenter = CellposeSegmenter(cellpose_model=cellpose_model)
         self._tracking_config = tracking_config
         self._scale = scale
         self._raman_glass_offset = raman_glass_offset
@@ -355,27 +361,26 @@ class RamanEngine(MDAEngine):
         which = np.asarray(which)
         P = event.index.get("p", -1)
         T = event.index.get("t", -1)
-        # Always segment the supplied image. The caller (setup_event) takes a
-        # fresh BF snap right before every call, so a fresh segmentation is the
-        # correct default. `use_same_img` only controls whether we *reuse* a
-        # neighbouring position's mask instead of this one.
-        new_mask = segment_single_img(
-            img, self._scale,
-            crop=self._segment_crop,
-            cellpose_model=self._cellpose_model,
-            circle_center=self._circle_center,
-            circle_radius=self._circle_radius
-        )
-        # Decide whether reusing the previous position's mask is even possible.
         can_reuse = (
             use_same_img
             and (P - 1) in self._last_segments
         )
+        if can_reuse:
+            # The neighbouring repeated position represents the same FOV, so
+            # reuse its mask without paying for a Cellpose inference that would
+            # immediately be discarded.
+            new_mask = self._last_segments[P - 1]
+        else:
+            new_mask = segment_single_img(
+                img, self._scale,
+                crop=self._segment_crop,
+                cellpose_model=self._cellpose_model,
+                circle_center=self._circle_center,
+                circle_radius=self._circle_radius,
+                segmenter=self._cellpose_segmenter,
+            )
         if T == 0:
-            if can_reuse:
-                self._last_segments[P] = self._last_segments[P - 1]
-            else:
-                self._last_segments[P] = new_mask
+            self._last_segments[P] = new_mask
             self.raman_events.aimUpdated.emit(event, img, self._last_segments[P], points, points)
             return
         prev = self._last_segments[P]
@@ -394,64 +399,74 @@ class RamanEngine(MDAEngine):
             )
         self._tracks[P] = tracked
         new_pts = np.array(new_pts)
-        # Ensure new_pts has at least shape (2, 2)
-        if new_pts.ndim < 2 or new_pts.shape[0] < 2 or new_pts.shape[1] < 2:
-            print(f"[WARNING] new_pts shape {new_pts.shape} is too small, recomputing from original points")
+        if (
+            new_pts.ndim != 2
+            or new_pts.shape[1] != 2
+            or new_pts.shape[0] != points.shape[0]
+        ):
+            print(f"[WARNING] invalid new_pts shape {new_pts.shape}; using original points")
             new_pts = points.copy()  # fall back to untransformed original points
-        if can_reuse:
-            self._last_segments[P] = self._last_segments[P-1]
-        else:
-            self._last_segments[P] = new_mask
+        self._last_segments[P] = new_mask
         self.raman_events.aimUpdated.emit(event, img, self._last_segments[P], new_pts, points)
         for source in self.aiming_sources:
             # if ("autofocus" in source.name.lower()) and (self._autofocus_object in ['glass', 'quartz']):
             if "autofocus" in source.name.lower():
                 continue
             update_pos_points(pos, new_pts[which == source.name], source._points)
-            return
     def reload(self, N=100):
+        if N < 1:
+            raise ValueError("N must be at least one")
         n = 0.1  # starting sleep time
+        last_error = None
         for attempt in range(N):
-            if attempt == N-1:
-                print('reach reloading maxiter')
             try:
                 time.sleep(n)
-                print('reloading config...')
+                print(f'reloading config (attempt {attempt + 1}/{N})...')
                 try:
                     self._mmc.events.channelGroupChanged.disconnect()
-                except Exception as e:
-                    None
+                except Exception:
+                    pass
                 try:
                     self._mmc.events.configGroupChanged.disconnect()
-                except Exception as e:
-                    None
+                except Exception:
+                    pass
                 try:
                     self._mmc.events.propertyChanged.disconnect()
-                except Exception as e:
-                    None
+                except Exception:
+                    pass
                 try:
                     self._mmc.events.systemConfigurationLoaded.disconnect()
-                except Exception as e:
-                    None
+                except Exception:
+                    pass
                 try:
                     self._mmc.events.configSet.disconnect()
-                except Exception as e:
-                    None
+                except Exception:
+                    pass
                 self._mmc.unloadAllDevices()
                 if self._config_file is None:
                     self._mmc.loadSystemConfiguration("test3.cfg")
                 else:
                     self._mmc.loadSystemConfiguration(self._config_file)
                 self._mmc.waitForSystem()
-                # QTimer.singleShot(0, lambda: self._mmc.unloadAllDevices())
-                # QTimer.singleShot(0, lambda: self._mmc.loadSystemConfiguration("test3.cfg"))
-                self.try_set_config("Channel", "GFP")
-                self.try_set_config("Channel", "BF")
-                # QTimer.singleShot(0, lambda: self._mmc.waitForSystem())
+                # Use the Core directly here. Calling try_set_config would be
+                # able to enter reload() recursively while recovery is already
+                # in progress.
+                self._mmc.setConfig("Channel", "GFP")
                 self._mmc.waitForSystem()
+                self._mmc.setConfig("Channel", "BF")
+                self._mmc.waitForSystem()
+                print('configuration reload succeeded')
                 return  # success!
-            except Exception as e:
+            except Exception as error:
+                last_error = error
+                print(
+                    f'configuration reload failed '
+                    f'(attempt {attempt + 1}/{N}): {error}'
+                )
                 n += 1  # increase wait time and retry
+        raise RuntimeError(
+            f'configuration reload failed after {N} attempts: {last_error}'
+        ) from last_error
     def try_set_XYPosition(self, x, y, N=2):
         n = 0  # starting sleep time
         for attempt in range(N):
@@ -510,6 +525,37 @@ class RamanEngine(MDAEngine):
             except RuntimeError:
                 n += 1  # increase wait time and retry
                 # QTimer.singleShot(0, lambda: self._mmc.waitForSystem())
+    def try_snap_and_get_image(self, N=2):
+        """Snap and read one image as a single recoverable transaction."""
+        if N < 1:
+            raise ValueError("N must be at least one")
+        n = 0
+        last_error = None
+        self._last_operation_reloaded = False
+        for attempt in range(N):
+            try:
+                if attempt > 0:
+                    print('snap/get image failed, reloading...')
+                    self.reload()
+                    self._last_operation_reloaded = True
+                time.sleep(n)
+                self._mmc.snapImage()
+                self._mmc.waitForSystem()
+                image = self._mmc.getImage()
+                if image is None:
+                    raise RuntimeError("camera returned no image")
+                self._mmc.waitForSystem()
+                return image
+            except RuntimeError as error:
+                last_error = error
+                print(
+                    f'snap/get image failed '
+                    f'(attempt {attempt + 1}/{N}): {error}'
+                )
+                n += 1
+        raise RuntimeError(
+            f'snap/get image failed after {N} attempts: {last_error}'
+        ) from last_error
     def try_snap_image(self, N=2):
         n = 0  # starting sleep time
         for attempt in range(N):
@@ -543,23 +589,36 @@ class RamanEngine(MDAEngine):
             except RuntimeError:
                 n += 1  # increase wait time and retry
     def try_get_image(self, N=2):
+        if N < 1:
+            raise ValueError("N must be at least one")
         n = 0  # starting sleep time
+        last_error = None
         self._last_operation_reloaded = False
         for attempt in range(N):
             if attempt == int(N/2):
                 print('get image reach maxiter, reloading...')
                 self.reload()
                 self._last_operation_reloaded = True
+                # Reloading clears the camera buffer, so create a replacement
+                # frame before trying to read it again.
+                self._mmc.snapImage()
+                self._mmc.waitForSystem()
             try:
                 time.sleep(n)
                 image = self._mmc.getImage()
+                if image is None:
+                    raise RuntimeError("camera returned no image")
                 self._mmc.waitForSystem()
                 # QTimer.singleShot(0, lambda: self._mmc.snapImage())
                 # QTimer.singleShot(0, lambda: self._mmc.waitForSystem())
                 # time.sleep(0.25)
                 return image # success!
-            except RuntimeError:
+            except RuntimeError as error:
+                last_error = error
                 n += 1  # increase wait time and retry
+        raise RuntimeError(
+            f'get image failed after {N} attempts: {last_error}'
+        ) from last_error
     def try_set_config(self, channel, group, N=2):
         n = 0  # starting sleep time
         self._last_operation_reloaded = False
@@ -859,10 +918,7 @@ class RamanEngine(MDAEngine):
                     time.sleep(0.5)
                     self.try_set_config(event.channel.group, self._segment_channel)
                     self.try_setExp(10)
-                    self.try_snap_image()
-                    image = self.try_get_image()
-                    if self._last_operation_reloaded and pos in self._last_images:
-                        image = self._last_images[pos]
+                    image = self.try_snap_and_get_image()
                     self._last_images[pos] = image
                     if self._autofocus:
                         use_same = pos not in self._autofocus_p
@@ -896,22 +952,20 @@ class RamanEngine(MDAEngine):
                 self.try_set_config(event.channel.group, "BF")
         if self._skip_imaging_for_same_pos:
             if event.index["p"] in self._image_p:
-                self.try_snap_image()
+                image = self.try_snap_and_get_image()
                 if (
                     (event.index["z"] == len(self._z_rel)-1)
                     and (event.channel.config != "BF")
                 ):
                     self.try_set_config(event.channel.group, "BF")
                 meta = self.get_frame_metadata(event)
-                image = self.try_get_image()
                 yield ImagePayload(image=image, event=event, metadata=meta)
         else:
-            self.try_snap_image()
+            image = self.try_snap_and_get_image()
             if (
                 (event.index["z"] == len(self._z_rel)-1)
                 and (event.channel.config != "BF")
             ):
                 self.try_set_config(event.channel.group, "BF")
             meta = self.get_frame_metadata(event)
-            image = self.try_get_image()
             yield ImagePayload(image=image, event=event, metadata=meta)
