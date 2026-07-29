@@ -33,6 +33,8 @@ classifiers = [
 ]
 
 dependencies = [
+    "btrack",
+    "cellpose",
     "mda-simulator",
     "napari-broadcastable-points>=0.2.0",
     "pymmcore-mda-writers",
